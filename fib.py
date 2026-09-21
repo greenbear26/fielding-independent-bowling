@@ -52,7 +52,7 @@ DEFAULT_COEFFICIENTS = [
 ]
 
 DEFAULT_CSV_PATH = 'data/bowler-stats.csv'
-DEFAULT_MIN_YEAR = 2015
+DEFAULT_MIN_YEAR = 2000
 
 
 def load_bowler_stats(csv_path=DEFAULT_CSV_PATH, min_year=DEFAULT_MIN_YEAR):
