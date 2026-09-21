@@ -54,6 +54,9 @@ DEFAULT_COEFFICIENTS = [
 DEFAULT_CSV_PATH = 'data/bowler-stats.csv'
 DEFAULT_MIN_YEAR = 2000
 
+# Attached by main.ipynb's aggregation stage, not computed here.
+NEXT_YEAR_COLUMN = 'next_year_economy'
+
 
 def load_bowler_stats(csv_path=DEFAULT_CSV_PATH, min_year=DEFAULT_MIN_YEAR):
     """Load per-bowler-season stats, keeping only seasons from `min_year` onward.
@@ -61,6 +64,11 @@ def load_bowler_stats(csv_path=DEFAULT_CSV_PATH, min_year=DEFAULT_MIN_YEAR):
     The CSV holds every season back to 2009, but the model was fitted on 2015+.
     """
     bowler_df = pd.read_csv(csv_path)
+    if NEXT_YEAR_COLUMN not in bowler_df.columns:
+        raise KeyError(
+            f"{csv_path} has no '{NEXT_YEAR_COLUMN}' column -- re-run main.ipynb "
+            'through the aggregation stage to regenerate it.'
+        )
     return bowler_df[bowler_df['Year'] >= min_year].copy()
 
 
@@ -100,15 +108,15 @@ def normalize_fib(df):
     return df
 
 
-def build_next_year_pairs(df):
-    """Attach each season's following-season economy as `next_year_economy`.
+def take_paired_seasons(df):
+    """Keep only bowler-seasons that have a following season to be scored against.
 
-    Only keeps bowler-seasons where that same bowler also has a qualifying season
-    the year after, so rows without a follow-up are dropped.
+    The pairing itself happens in main.ipynb, which writes `next_year_economy`
+    into the CSV; it is blank where that bowler has no qualifying season the year
+    after, so those rows drop out here.
     """
-    following = df[['Bowler', 'Year', 'Economy']].rename(columns={'Economy': 'next_year_economy'})
-    following['Year'] -= 1
-    return df.merge(following, on=['Bowler', 'Year'], how='inner').reset_index(drop=True)
+    df = df[df[NEXT_YEAR_COLUMN].notna()]
+    return df.reset_index(drop=True)
 
 
 def _print_yearly_stats(df):
@@ -132,7 +140,7 @@ def _plot_comparison(df, correlation_fib, correlation_economy):
         ('Economy', 'Current Year Economy vs Next Year Economy', correlation_economy),
     ), start=1):
         plt.subplot(1, 2, position)
-        sns.scatterplot(x=column, y='next_year_economy', data=df)
+        sns.scatterplot(x=column, y=NEXT_YEAR_COLUMN, data=df)
         plt.title(title)
         plt.xlabel(column)
         plt.ylabel('Next Year Economy')
@@ -161,9 +169,9 @@ def evaluate_fib(coefficients=DEFAULT_COEFFICIENTS, csv_path=DEFAULT_CSV_PATH,
     if verbose:
         _print_yearly_stats(bowler_df)
 
-    paired_df = build_next_year_pairs(bowler_df)
-    correlation_fib = paired_df['FIB'].corr(paired_df['next_year_economy'])
-    correlation_economy = paired_df['Economy'].corr(paired_df['next_year_economy'])
+    paired_df = take_paired_seasons(bowler_df)
+    correlation_fib = paired_df['FIB'].corr(paired_df[NEXT_YEAR_COLUMN])
+    correlation_economy = paired_df['Economy'].corr(paired_df[NEXT_YEAR_COLUMN])
     improvement = correlation_fib - correlation_economy
 
     print(f'\nSeasons {min_year}+: {len(bowler_df)} bowler-seasons, '
