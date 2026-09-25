@@ -10,6 +10,9 @@ repeat:
     from fib import evaluate_fib
     evaluate_fib([6.1821, 5.7628, 1.9969, 2.8617, -2.5032, -4.5166, 1.4290, -1.4063, -11.2354])
 
+To try a different feature set, pass `feature_columns` alongside the coefficients
+that were fitted on it.
+
 This module never writes to disk.
 """
 
@@ -34,25 +37,17 @@ FEATURE_COLUMNS = [
 # Intercept first, then one coefficient per entry in FEATURE_COLUMNS.
 # These are the values fitted in main.ipynb on 2015+ seasons.
 DEFAULT_COEFFICIENTS = [
-    # 2015+ Training
-    # 6.1821,   # intercept
-    # 5.7628,   # Sixes
-    # 1.9969,   # Wides
-    # 2.8617,   # NoBalls
-    # -2.5032,  # BowledWickets
-    # -4.5166,  # LbwWickets
-    # 1.4290,   # HitWicketWickets
-    # -1.4063,  # CaughtAndBowledWickets
-    # -11.2354,  # StumpedWickets
 
-    # Total data training
+    # 6.093429067288927,
+    # 6.09152908,   1.73365948,   1.76918265,  -2.28802524,
+    #      -4.20541236,   4.44205485,  -2.71771511, -11.97673927
     6.093429067288927,
-    6.09152908,   1.73365948,   1.76918265,  -2.28802524,
-         -4.20541236,   4.44205485,  -2.71771511, -11.97673927
+    243.66116326,  79.74833612,  19.46100916, -36.60840377,
+        -25.23247416,   8.88410971, -10.87086046, -59.88369637
 ]
 
 DEFAULT_CSV_PATH = 'data/bowler-stats.csv'
-DEFAULT_MIN_YEAR = 2000
+DEFAULT_MIN_YEAR = 2020
 
 # Attached by main.ipynb's aggregation stage, not computed here.
 NEXT_YEAR_COLUMN = 'next_year_economy'
@@ -72,21 +67,27 @@ def load_bowler_stats(csv_path=DEFAULT_CSV_PATH, min_year=DEFAULT_MIN_YEAR):
     return bowler_df[bowler_df['Year'] >= min_year].copy()
 
 
-def compute_raw_fib(df, coefficients):
+def compute_raw_fib(df, coefficients, feature_columns=FEATURE_COLUMNS):
     """Add a `raw_FIB` column: the coefficients applied to per-over feature rates.
 
-    `coefficients[0]` is the intercept; the rest line up with FEATURE_COLUMNS in
-    order. raw_FIB lands on an arbitrary scale -- see `normalize_fib`.
+    `coefficients[0]` is the intercept; the rest line up positionally with
+    `feature_columns`, which defaults to FEATURE_COLUMNS. Pass the two together --
+    a vector fitted on one feature set means nothing against another.
+    raw_FIB lands on an arbitrary scale -- see `normalize_fib`.
     """
-    expected = len(FEATURE_COLUMNS) + 1
+    expected = len(feature_columns) + 1
     if len(coefficients) != expected:
         raise ValueError(
             f'Expected {expected} coefficients (1 intercept + '
-            f'{len(FEATURE_COLUMNS)} for {FEATURE_COLUMNS}), got {len(coefficients)}.'
+            f'{len(feature_columns)} for {feature_columns}), got {len(coefficients)}.'
         )
 
+    missing = [column for column in feature_columns if column not in df.columns]
+    if missing:
+        raise KeyError(f'Feature columns missing from the data: {missing}.')
+
     coefficients = np.asarray(coefficients, dtype=float)
-    per_over_rates = df[FEATURE_COLUMNS].div(df['Overs'], axis=0)
+    per_over_rates = df[feature_columns].div(df['Overs'], axis=0)
 
     df = df.copy()
     df['raw_FIB'] = coefficients[0] + per_over_rates @ coefficients[1:]
@@ -151,19 +152,24 @@ def _plot_comparison(df, correlation_fib, correlation_economy):
 
 
 def evaluate_fib(coefficients=DEFAULT_COEFFICIENTS, csv_path=DEFAULT_CSV_PATH,
-                 min_year=DEFAULT_MIN_YEAR, plot=False, verbose=False):
+                 min_year=DEFAULT_MIN_YEAR, feature_columns=FEATURE_COLUMNS,
+                 plot=False, verbose=False):
     """Score a coefficient vector and print how it compares against raw economy rate.
 
     Prints the correlation of FIB with next season's economy alongside the
     correlation of the current season's economy with next season's economy. FIB
     is only an improvement if it correlates more strongly.
 
+    `feature_columns` selects which per-over rates the coefficients apply to, so a
+    different feature set can be tried without editing this module -- pass the
+    same list the coefficients were fitted on.
+
     Set `verbose` for per-year normalization tables, `plot` for a scatter
     comparison. Returns a dict with both correlations, their difference, and the
     paired DataFrame.
     """
     bowler_df = load_bowler_stats(csv_path, min_year)
-    bowler_df = compute_raw_fib(bowler_df, coefficients)
+    bowler_df = compute_raw_fib(bowler_df, coefficients, feature_columns)
     bowler_df = normalize_fib(bowler_df)
 
     if verbose:
