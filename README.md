@@ -4,3 +4,5 @@ This repository aims to create a statistic to better predict what a cricket bowl
 
 ## Data
 The data to train this statistic will come from the IPL, specifically, from this [repository](https://github.com/ritesh-ojha/IPL-DATASET).
+
+**This project is currently in progress, and will be updated over time**
