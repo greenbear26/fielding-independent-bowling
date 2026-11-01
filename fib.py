@@ -16,6 +16,8 @@ that were fitted on it.
 This module never writes to disk.
 """
 
+import itertools
+
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
@@ -48,6 +50,9 @@ DEFAULT_COEFFICIENTS = [
 
 DEFAULT_CSV_PATH = 'data/bowler-stats.csv'
 DEFAULT_MIN_YEAR = 2020
+
+# Guards brute_force_fib against accidentally launching a multi-hour grid.
+DEFAULT_MAX_COMBINATIONS = 10_000_000
 
 # Attached by main.ipynb's aggregation stage, not computed here.
 NEXT_YEAR_COLUMN = 'next_year_economy'
@@ -196,6 +201,120 @@ def evaluate_fib(coefficients=DEFAULT_COEFFICIENTS, csv_path=DEFAULT_CSV_PATH,
         'improvement': improvement,
         'paired_df': paired_df,
     }
+
+
+def _score_coefficient_batch(per_over_rates, year_rows, economy_by_year, paired_mask, next_year,
+                             coefficient_batch):
+    """Correlation with next year's economy for each row of `coefficient_batch`.
+
+    A vectorized equivalent of compute_raw_fib -> normalize_fib -> take_paired_seasons
+    -> corr, so thousands of vectors can be scored without a pandas pass for each.
+    """
+    raw_fib = coefficient_batch[:, 0] + per_over_rates @ coefficient_batch[:, 1:].T
+
+    fib = np.empty_like(raw_fib)
+    for year, rows in year_rows.items():
+        economy_mean, economy_std = economy_by_year[year]
+        year_raw = raw_fib[rows]
+        z_score = (year_raw - year_raw.mean(axis=0)) / year_raw.std(axis=0, ddof=1)
+        fib[rows] = z_score * economy_std + economy_mean
+
+    fib_centered = fib[paired_mask] - fib[paired_mask].mean(axis=0)
+    next_centered = next_year - next_year.mean()
+    return (next_centered @ fib_centered) / np.sqrt(
+        (fib_centered ** 2).sum(axis=0) * (next_centered ** 2).sum()
+    )
+
+
+def brute_force_fib(coefficients=DEFAULT_COEFFICIENTS, span=1.0, step=0.5, indices=None,
+                    csv_path=DEFAULT_CSV_PATH, min_year=DEFAULT_MIN_YEAR,
+                    feature_columns=FEATURE_COLUMNS, top=10,
+                    max_combinations=DEFAULT_MAX_COMBINATIONS, batch_size=5000):
+    """Grid-search coefficient vectors around `coefficients`, scoring each like evaluate_fib.
+
+    Each coefficient in `indices` is tried at every value from `base - span` to
+    `base + span` in increments of `step`; every combination across those indices is
+    scored, with the remaining coefficients held at their base values. `span` and
+    `step` may be scalars or one value per entry in `indices`.
+
+    `indices` defaults to every feature coefficient but not the intercept (index 0):
+    per-year normalization z-scores raw_FIB, so the intercept cancels out and cannot
+    change the correlation. For the same reason, scaling every feature coefficient by
+    one positive factor leaves the correlation unchanged.
+
+    The grid size is the product of the per-index value counts and grows quickly;
+    a search over `max_combinations` raises instead of running.
+
+    Prints the `top` best vectors. Returns a DataFrame of every vector tried, sorted
+    by `correlation_fib` descending, with its `improvement` over economy rate.
+    """
+    coefficients = np.asarray(coefficients, dtype=float)
+    expected = len(feature_columns) + 1
+    if len(coefficients) != expected:
+        raise ValueError(
+            f'Expected {expected} coefficients (1 intercept + '
+            f'{len(feature_columns)} for {feature_columns}), got {len(coefficients)}.'
+        )
+
+    indices = list(range(1, expected)) if indices is None else list(indices)
+    spans = np.broadcast_to(np.asarray(span, dtype=float), (len(indices),))
+    steps = np.broadcast_to(np.asarray(step, dtype=float), (len(indices),))
+    if np.any(steps <= 0):
+        raise ValueError('`step` must be positive.')
+
+    # linspace rather than arange so floating-point drift can't drop the endpoint.
+    value_grids = [
+        coefficients[index] + np.linspace(-index_span, index_span, int(round(2 * index_span / index_step)) + 1)
+        for index, index_span, index_step in zip(indices, spans, steps)
+    ]
+    total = int(np.prod([len(values) for values in value_grids]))
+    if total > max_combinations:
+        raise ValueError(
+            f'Grid has {total:,} combinations, over max_combinations={max_combinations:,}. '
+            'Narrow `indices`, shrink `span`, widen `step`, or raise `max_combinations`.'
+        )
+
+    bowler_df = load_bowler_stats(csv_path, min_year).reset_index(drop=True)
+    missing = [column for column in feature_columns if column not in bowler_df.columns]
+    if missing:
+        raise KeyError(f'Feature columns missing from the data: {missing}.')
+
+    per_over_rates = bowler_df[feature_columns].div(bowler_df['Overs'], axis=0).to_numpy()
+    year_rows = bowler_df.groupby('Year').indices
+    economy_by_year = {
+        year: (bowler_df['Economy'].iloc[rows].mean(), bowler_df['Economy'].iloc[rows].std())
+        for year, rows in year_rows.items()
+    }
+    paired_mask = bowler_df[NEXT_YEAR_COLUMN].notna().to_numpy()
+    next_year = bowler_df.loc[paired_mask, NEXT_YEAR_COLUMN].to_numpy()
+
+    paired_df = take_paired_seasons(bowler_df)
+    correlation_economy = paired_df['Economy'].corr(paired_df[NEXT_YEAR_COLUMN])
+
+    print(f'\nSearching {total:,} coefficient vectors over indices {indices} '
+          f'(seasons {min_year}+, {paired_mask.sum()} with a following season).')
+
+    combinations = itertools.product(*value_grids)
+    batches = []
+    while batch := list(itertools.islice(combinations, batch_size)):
+        coefficient_batch = np.tile(coefficients, (len(batch), 1))
+        coefficient_batch[:, indices] = batch
+        correlations = _score_coefficient_batch(per_over_rates, year_rows, economy_by_year,
+                                                paired_mask, next_year, coefficient_batch)
+        batches.append(np.column_stack([coefficient_batch, correlations]))
+
+    results = pd.DataFrame(np.vstack(batches),
+                           columns=['Intercept', *feature_columns, 'correlation_fib'])
+    results['improvement'] = results['correlation_fib'] - correlation_economy
+    results = results.sort_values('correlation_fib', ascending=False).reset_index(drop=True)
+
+    print(f'  Economy vs next year economy: {correlation_economy:.4f}')
+    print(f'  Best FIB vs next year economy: {results["correlation_fib"].iloc[0]:.4f} '
+          f'({results["improvement"].iloc[0]:+.4f})')
+    print(f'\nTop {top}:')
+    print(results.head(top).to_string())
+
+    return results
 
 
 if __name__ == '__main__':

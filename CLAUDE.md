@@ -10,10 +10,10 @@ bowler controls without help from fielders. Modeled on baseball's FIP. Data is I
 data from https://github.com/ritesh-ojha/IPL-DATASET.
 
 Two files do the work. [main.ipynb](main.ipynb) handles data cleaning, per-bowler-season
-aggregation, pairing each season with the bowler's next one, and fitting the regression — it ends
-once the coefficients are printed.
-[fib.py](fib.py) takes a coefficient vector and scores it. There is no package, no test suite, and
-no lint config.
+aggregation, pairing each season with the bowler's next one, 0–1 scaling, and fitting the
+regression; it then scores the fit by calling into `fib.py`.
+[fib.py](fib.py) takes a coefficient vector and scores it, or grid-searches around one. There is no
+package, no test suite, and no lint config.
 
 ## Environment
 
@@ -21,7 +21,8 @@ no lint config.
 There is **no requirements.txt or pyproject.toml** — dependencies were pip-installed ad hoc. Currently:
 pandas 3.0.5, numpy 2.5.2, scikit-learn 1.9.0, matplotlib 3.11.1, seaborn 0.13.2, ipykernel/jupyter.
 If you add an import, install it into `.venv` and mention it to the user; consider proposing a
-requirements file rather than silently creating one.
+requirements file rather than silently creating one. `nbconvert`/`nbclient` are **not** installed,
+so the notebook can't be executed headlessly — the user runs it in VS Code.
 
 ```bash
 source .venv/bin/activate
@@ -33,9 +34,9 @@ The notebook's saved kernel is `.venv (3.13.7)`; select that kernel, not a globa
 
 ## Pipeline
 
-Stages 1–4 are the notebook, which is a linear chain of in-memory DataFrames and must be run top to
-bottom. Stage 5 is `fib.py`, which is independent — it reads `data/bowler-stats.csv` from disk, so
-it only needs the notebook to have been run at some earlier point.
+Cell numbers below are 0-indexed. The notebook is a linear chain of in-memory DataFrames and must
+be run top to bottom. `fib.py` is independent — it reads `data/bowler-stats.csv` from disk, so it
+only needs the notebook to have been run at some earlier point.
 
 1. **Load & clean** (cells 2–10) → `filtered_df`
    Merges `data/ball-data.csv` with `data/match-info.csv` on `ID` (renamed from `match_number`),
@@ -43,16 +44,24 @@ it only needs the notebook to have been run at some earlier point.
    derived from `match_date`.
 2. **Aggregate per bowler-season** (cell 11) → `bowler_df`
    Nested loop over `Year` × `Bowler`. **Bowler-seasons under 100 legal balls are skipped.**
-3. **Pair with the following season** (cell 12) → `next_year_economy` column, and the whole frame
-   is written to `data/bowler-stats.csv` (this cell is the only write).
+3. **Pair with the following season** (cell 12) → `next_year_economy` column.
    Loop looking up the same `Bowler` at `Year + 1`; blank where that bowler has no qualifying season
    the year after (467 of 1072 rows). This is the target `fib.py` scores against, and it lives here
    because it's a property of the data, not of the coefficient vector being tuned.
-4. **Fit** (cells 14–16) → `fib_reg`
-   Fits a `LinearRegression` on 2015+ seasons, regressing per-over feature rates against `Economy`.
-   Cell 15 plots predicted vs actual; cell 16 prints the coefficients. **The notebook ends here** —
-   copy the printed coefficients into `fib.py` to score them.
-5. **Score** — `fib.py`, run standalone or imported.
+4. **Derived columns & scaling** (cells 13–16)
+   Cell 13 adds `Economy_avg` (that year's league mean) and `Economy_diff`. Cell 15 first copies the
+   frame to `unscaled_bowler_df`, then min-max scales the count columns and `Economy_avg`/
+   `Economy_diff` of `bowler_df` to 0–1 using the min and max **across all years**. `Economy` and
+   `next_year_economy` are never scaled. Cell 16 adds `_Squared`/`_Cubed`/`_4` powers and `Era`
+   (0 before 2014, 1 through 2022, 2 after) to both frames — in the scaled frame the powers are
+   of the scaled values.
+5. **Save** (cell 17, the only write) → `data/bowler-stats.csv` (scaled) and
+   `data/bowler-stats-unscaled.csv` (raw counts).
+6. **Fit** (cells 19–20) → `fib_reg`
+   Cell 19 defines `feature_columns` and `min_year`, then fits a `LinearRegression` of
+   `feature / Overs` against `Economy` on the scaled frame. Cell 20 prints the coefficients.
+7. **Score & plot** (cells 22, 24) — cell 22 calls `evaluate_fib` with the fitted vector and the
+   same `feature_columns`/`min_year`; cell 24 scatters each input against next year's economy.
 
 ### Scoring a coefficient vector (`fib.py`)
 
@@ -65,17 +74,31 @@ correlation, and repeat:
 
 ```python
 from fib import evaluate_fib
-evaluate_fib([6.1821, 5.7628, 1.9969, 2.8617, -2.5032, -4.5166, 1.4290, -1.4063, -11.2354])
+evaluate_fib()                                       # DEFAULT_COEFFICIENTS on FEATURE_COLUMNS
+evaluate_fib(coefficients, feature_columns=[...])    # any other feature set
 ```
 
 `plot=True` draws the two-panel comparison scatter; `verbose=True` prints per-year normalization
-tables. The function **never writes to disk**, so rapid tweaking can't dirty a tracked file.
+tables. Nothing in `fib.py` **writes to disk**, so rapid tweaking can't dirty a tracked file.
+Defaults: `csv_path='data/bowler-stats.csv'` (the scaled file) and `min_year=2020`.
 
-Element 0 of the vector is the intercept; elements 1–8 align positionally with `FEATURE_COLUMNS`.
-`compute_raw_fib` validates the length and raises, so a mismatched vector fails loudly rather than
-silently mis-mapping — but **reordering `FEATURE_COLUMNS` still silently changes what a given vector
-means**, since length is unchanged. As of this writing `DEFAULT_COEFFICIENTS` is exactly the fitted
-output of cell 16, not a hand-tuned divergence from it; it's the starting point for tuning.
+Element 0 of the vector is the intercept; the rest align positionally with `feature_columns`
+(default `FEATURE_COLUMNS`, 8 features). `compute_raw_fib` validates the length and raises, so a
+mismatched vector fails loudly rather than silently mis-mapping — but **reordering
+`FEATURE_COLUMNS` still silently changes what a given vector means**, since length is unchanged.
+`DEFAULT_COEFFICIENTS` were fitted on the **scaled** CSV (hence magnitudes like Sixes ≈ 244); they
+are meaningless against `bowler-stats-unscaled.csv`. They don't match the notebook's current fit,
+which uses a different 6-feature set.
+
+`brute_force_fib(coefficients, span, step, indices=...)` grid-searches every combination of
+`base ± span` in increments of `step` for the coefficients in `indices` (default: all features,
+not the intercept), and returns a DataFrame of every vector sorted by correlation. It reimplements
+the scoring with numpy (`_score_coefficient_batch`) rather than calling `evaluate_fib` per vector,
+so **any change to `normalize_fib` or `take_paired_seasons` must be mirrored there**; checking
+that `brute_force_fib(span=0, ...)` reproduces `evaluate_fib`'s correlation catches drift. It
+raises above `max_combinations` (default 1,000,000). Two invariances make parts of any grid
+redundant: the intercept never changes the correlation (per-year z-scoring cancels it), nor does
+multiplying all feature coefficients by one positive factor.
 
 `load_bowler_stats` raises `KeyError` if the CSV has no `next_year_economy` column, so a CSV
 predating this split fails immediately with a pointer to re-run the notebook rather than blowing up
@@ -110,14 +133,18 @@ These cricket-specific decisions are embedded in cell 11 and are easy to break:
 
 ## Data files
 
-All four CSVs in [data/](data/) are committed:
-
 | File | Role | Key |
 | --- | --- | --- |
 | `ball-data.csv` | Input, ~295k deliveries | `ID, Innings, Overs, BallNumber` |
 | `match-info.csv` | Input, ~1.2k matches | `match_number` → renamed `ID` |
-| `bowler-stats.csv` | Generated by cell 12, all years from 2009, 1072 rows | `Year, Bowler` |
+| `bowler-stats.csv` | Generated by cell 17, 0–1 scaled features, all years from 2008, 1072 rows | `Year, Bowler` |
+| `bowler-stats-unscaled.csv` | Generated by cell 17, same rows with raw counts | `Year, Bowler` |
 | `bowler-stats-with-fib.csv` | **Stale artifact** — see below | `Year, Bowler` |
+
+`bowler-stats-unscaled.csv` doesn't exist until the notebook is re-run after the cell 15–17 change
+that introduced it; the committed `bowler-stats.csv` predates the min-max fix too (its
+`Economy_avg`/`Economy_diff` aren't 0–1). The fix doesn't change the 8 `FEATURE_COLUMNS`, whose
+minimum is 0.
 
 `bowler-stats-with-fib.csv` is no longer written by any code path. It is a frozen snapshot of a
 past experiment, and its numbers do **not** correspond to `DEFAULT_COEFFICIENTS`: it was generated
@@ -140,5 +167,6 @@ within this dataset.
   `df.copy()` before adding a column), so they can be chained or called out of order safely.
 - Cell comments are terse one-liners above each block, and markdown cells carry open questions and
   "MAYBE" notes about feature choices. Keep that record intact when editing — it's the project's
-  design log. Cell 15 still carries a commented-out block of 5 stale coefficients from an older
-  feature set; it doesn't match the current 8-feature model.
+  design log (cell 25 is the running "What I did / Next steps" log). Cell 20 still carries a
+  commented-out block of 5 stale coefficients from an older feature set; it doesn't match the
+  current model.
