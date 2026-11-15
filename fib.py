@@ -311,6 +311,7 @@ def brute_force_fib(coefficients=DEFAULT_COEFFICIENTS, span=1.0, step=0.5, indic
     print(f'  Economy vs next year economy: {correlation_economy:.4f}')
     print(f'  Best FIB vs next year economy: {results["correlation_fib"].iloc[0]:.4f} '
           f'({results["improvement"].iloc[0]:+.4f})')
+    print(f'Best coefficeients: {results.iloc[0][["Intercept", *feature_columns]].to_list()}')
     print(f'\nTop {top}:')
     print(results.head(top).to_string())
 
